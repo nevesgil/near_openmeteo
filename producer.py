@@ -5,23 +5,23 @@ import schedule
 import time
 import logging
 
-# Set up logging
+# set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Default producer configuration
+# default producer configuration
 producer_config = {
     "bootstrap.servers": "localhost:29092",
-    # Uncomment and adjust these as needed
-    # 'batch.size': 200000,
-    # 'linger.ms': 100,
+    # to be adjusted
+    "batch.size": 200000,
+    "linger.ms": 100,
     # 'compression.type': 'lz4',
     # 'acks': '1',
     # 'max.request.size': 10000000,
     # 'buffer.memory': 33554432
 }
 
-# Create the producer once
+# create the producer
 producer = Producer(producer_config)
 
 latitude = 23.5
@@ -62,6 +62,7 @@ def send_message_to_kafka(topic, data):
         producer.poll(1)
 
 
+# this is to be replaced once we have a cronjob to trigger the producer
 def job():
     try:
         weather_data = get_message_data(latitude, longitude)
@@ -71,14 +72,17 @@ def job():
         logger.error(f"Error in job execution: {e}")
 
 
-schedule.every(1).minute.do(job)
+schedule.every(1).second.do(job)
 
 
+# just for testing, 60 messages
 def main():
     try:
-        while True:
+        i = 0
+        while i <= 10:
             schedule.run_pending()
             time.sleep(1)
+            i += 1
     except KeyboardInterrupt:
         logger.info("Shutting down...")
     finally:

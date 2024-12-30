@@ -1,17 +1,24 @@
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, BigInteger
+from sqlalchemy import (
+    create_engine,
+    Column,
+    Integer,
+    String,
+    Float,
+    DateTime,
+    BigInteger,
+)
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
-# Database Configuration
+# remember to use another service to store the credentials
 DATABASE_URL = "postgresql://admin:admin@localhost:5432/database"
 
-# Create the SQLAlchemy engine
 engine = create_engine(DATABASE_URL)
 
-# Base class for models
 Base = declarative_base()
 
-# Weather Data Model
+
+# considering I'm saving the data transformed in the consumer
 class WeatherData(Base):
     __tablename__ = "weather_data"
 
@@ -22,7 +29,8 @@ class WeatherData(Base):
     winddirection = Column(Float)
     weathercode = Column(Integer)
 
-# Kafka Offset Model
+
+# tracker, review this one
 class KafkaOffset(Base):
     __tablename__ = "kafka_offsets"
 
@@ -32,8 +40,7 @@ class KafkaOffset(Base):
     offset = Column(BigInteger, nullable=False)
     timestamp = Column(DateTime, nullable=False)
 
-# Create tables
+
 Base.metadata.create_all(engine)
 
-# Session factory
 Session = sessionmaker(bind=engine)

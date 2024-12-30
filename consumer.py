@@ -1,83 +1,134 @@
-from confluent_kafka import Consumer, KafkaError
-from db.db import WeatherData, KafkaOffset, Session  # Assuming you have these models defined
-from datetime import datetime
+import signal
 import json
+from datetime import datetime
+from confluent_kafka import Consumer, KafkaError, TopicPartition, OFFSET_BEGINNING
+from db.db import Session, KafkaOffset, WeatherData, engine
+import logging
+
+# Logging setup
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
+
 
 # Kafka Consumer Configuration
 consumer_config = {
-    'bootstrap.servers': 'localhost:29092',
-    'group.id': 'weather_consumer_group',
-    'auto.offset.reset': 'earliest',
-    'enable.auto.commit': False
+    "bootstrap.servers": "localhost:29092",
+    "group.id": "weather_consumer_group",
+    "auto.offset.reset": "earliest",
+    "enable.auto.commit": False,
 }
 
-consumer = Consumer(consumer_config)
-consumer.subscribe(['weather-topic'])
+# Global flag for graceful shutdown
+shutdown_flag = False
 
-def process_message(session, message):
-    # Parse the message
-    data = json.loads(message.value().decode('utf-8'))
-    
-    # Extract the 'current_weather' section from the message
+
+def transform_message(message):
+    data = json.loads(message.value().decode("utf-8"))
     current_weather = data.get("current_weather", {})
-    
-    # Create WeatherData object with the correct data structure
-    weather_data = WeatherData(
+    return WeatherData(
         timestamp=datetime.now(),
-        temperature=current_weather.get('temperature'),
-        windspeed=current_weather.get('windspeed'),
-        winddirection=current_weather.get('winddirection'),
-        weathercode=current_weather.get('weathercode')
+        temperature=current_weather.get("temperature"),
+        windspeed=current_weather.get("windspeed"),
+        winddirection=current_weather.get("winddirection"),
+        weathercode=current_weather.get("weathercode"),
     )
-    session.add(weather_data)
-    session.commit()
 
 
-def get_last_offset(session, topic, partition):
-    return session.query(KafkaOffset).filter_by(
-        topic=topic, partition=partition
-    ).order_by(KafkaOffset.offset.desc()).first()
+def get_latest_offset(session, topic, partition):
+    offset_record = (
+        session.query(KafkaOffset)
+        .filter_by(topic=topic, partition=partition)
+        .order_by(KafkaOffset.offset.desc())
+        .first()
+    )
+    # Return the offset or OFFSET_BEGINNING if no record exists
+    return offset_record.offset if offset_record else OFFSET_BEGINNING
+
 
 def update_offset(session, topic, partition, offset):
     kafka_offset = KafkaOffset(
-        topic=topic,
-        partition=partition,
-        offset=offset,
-        timestamp=datetime.now()
+        topic=topic, partition=partition, offset=offset, timestamp=datetime.now()
     )
     session.add(kafka_offset)
     session.commit()
 
-def main():
+
+def process_data(session, weather_data):
+    session.add(weather_data)
+    session.commit()
+
+
+def consume_messages():
+    consumer = Consumer(consumer_config)
     session = Session()
+
     try:
-        while True:
+        # Get partitions and assign specific offsets
+        partitions = (
+            consumer.list_topics("weather-topic").topics["weather-topic"].partitions
+        )
+        topic_partitions = []
+
+        for partition in partitions:
+            tp = TopicPartition("weather-topic", partition)
+            last_offset = get_latest_offset(session, "weather-topic", partition)
+            print(f"Last offset for partition {partition}: {last_offset}")
+            if last_offset is not None:
+                tp.offset = last_offset  # Start from the last unprocessed offset
+            else:
+                tp.offset = OFFSET_BEGINNING  # Start from the beginning
+            topic_partitions.append(tp)
+
+        # Assign partitions to the consumer
+        consumer.assign(topic_partitions)
+
+        # Seek to the desired offsets
+        for tp in topic_partitions:
+            consumer.seek(tp)
+
+        while not shutdown_flag:
             msg = consumer.poll(1.0)
             if msg is None:
                 continue
+
             if msg.error():
                 if msg.error().code() == KafkaError._PARTITION_EOF:
                     continue
-                else:
-                    print(f"Error: {msg.error()}")
-                    break
-
-            # Check if message has been processed
-            last_offset = get_last_offset(session, msg.topic(), msg.partition())
-            if last_offset and msg.offset() <= last_offset.offset:
+                logging.error(f"Kafka error: {msg.error()}")
                 continue
 
-            # Process the message
-            process_message(session, msg)
+            print(
+                f"Processing message from topic {msg.topic()}, partition {msg.partition()}, offset {msg.offset()}"
+            )
 
-            # Update the offset
-            update_offset(session, msg.topic(), msg.partition(), msg.offset() + 1)
+            try:
+                weather_data = transform_message(msg)
+                process_data(session, weather_data)
+                # Update the last processed offset
+                update_offset(session, msg.topic(), msg.partition(), msg.offset() + 1)
+            except Exception as e:
+                logging.error(f"Error processing message: {e}")
 
-    except KeyboardInterrupt:
-        pass
+    except Exception as e:
+        logging.error(f"Unexpected error: {e}")
     finally:
+        logging.info("Finalizing consumer...")
         consumer.close()
         session.close()
 
+
+def signal_handler(signum, frame):
+    global shutdown_flag
+    print("Shutdown signal received. Closing consumer...")
+    shutdown_flag = True
+
+
 if __name__ == "__main__":
-    main()
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    try:
+        consume_messages()
+    except Exception as e:
+        print(f"Unexpected error: {e}")
