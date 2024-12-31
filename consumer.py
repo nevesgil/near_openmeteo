@@ -4,6 +4,7 @@ from datetime import datetime
 from confluent_kafka import Consumer, KafkaError, TopicPartition, OFFSET_BEGINNING
 from db.db import Session, KafkaOffset, WeatherData, engine
 import logging
+from time import time
 
 # Logging setup
 logging.basicConfig(
@@ -62,6 +63,10 @@ def process_data(session, weather_data):
 def consume_messages():
     consumer = Consumer(consumer_config)
     session = Session()
+    idle_threshold = 10  # seconds
+    max_empty_polls = 5
+    last_message_time = time()
+    empty_poll_count = 0
 
     try:
         # Get partitions and assign specific offsets
@@ -88,9 +93,19 @@ def consume_messages():
             consumer.seek(tp)
 
         while not shutdown_flag:
-            msg = consumer.poll(1.0)
+            msg = consumer.poll(5.0)
             if msg is None:
+                empty_poll_count += 1
+                if empty_poll_count >= max_empty_polls:
+                    if time() - last_message_time > idle_threshold:
+                        logging.info(
+                            "Consumer idle. No new messages. Closing consumer."
+                        )
+                        break
                 continue
+
+            empty_poll_count = 0
+            last_message_time = time()
 
             if msg.error():
                 if msg.error().code() == KafkaError._PARTITION_EOF:
